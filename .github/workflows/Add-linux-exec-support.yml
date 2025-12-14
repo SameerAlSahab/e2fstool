@@ -43,16 +43,55 @@ jobs:
         git clone --depth 1 --branch android-10.0.0_r47 \
           https://android.googlesource.com/platform/system/core android-core
     
+    - name: Create missing Android headers
+      run: |
+        # Create the android_filesystem_capability.h header if it doesn't exist
+        sudo mkdir -p /usr/local/include/private
+        
+        cat > /tmp/android_filesystem_capability.h << 'EOF'
+        #ifndef ANDROID_FILESYSTEM_CAPABILITY_H
+        #define ANDROID_FILESYSTEM_CAPABILITY_H
+        
+        #include <stdint.h>
+        #include <sys/types.h>
+        
+        #define VFS_CAP_REVISION_MASK   0xFF000000
+        #define VFS_CAP_REVISION_SHIFT  24
+        #define VFS_CAP_FLAGS_MASK      ~VFS_CAP_REVISION_MASK
+        #define VFS_CAP_FLAGS_EFFECTIVE 0x000001
+        
+        #define VFS_CAP_REVISION_1      0x01000000
+        #define VFS_CAP_REVISION_2      0x02000000
+        #define VFS_CAP_REVISION        VFS_CAP_REVISION_2
+        
+        #define XATTR_CAPS_SZ (sizeof(__le32)*(1 + 2*2))
+        
+        struct vfs_cap_data {
+            uint32_t magic_etc;
+            struct {
+                uint32_t permitted;
+                uint32_t inheritable;
+            } data[2];
+        };
+        
+        #endif
+        EOF
+        
+        sudo cp /tmp/android_filesystem_capability.h /usr/local/include/private/
+    
     - name: Build libsparse from source
       run: |
         cd android-core/libsparse
+        
+        # Patch output_file.cpp to fix typeof issue
+        sed -i 's/typeof/__typeof__/g' output_file.cpp
         
         # Create a simple Makefile for libsparse
         cat > Makefile << 'EOF'
         CC = gcc
         CXX = g++
         CFLAGS = -Wall -O2 -fPIC -Iinclude
-        CXXFLAGS = -Wall -O2 -fPIC -Iinclude -std=c++11
+        CXXFLAGS = -Wall -O2 -fPIC -Iinclude -std=gnu++11
         
         SOURCES = backed_block.cpp output_file.cpp sparse.cpp sparse_crc32.cpp sparse_err.cpp sparse_read.cpp
         OBJECTS = $(SOURCES:.cpp=.o)
@@ -203,6 +242,7 @@ jobs:
     
     - name: Display build info
       run: |
+        echo "=== Build Summary ==="
         echo "OS: ${{ matrix.os }}"
         echo "GCC Version: $(gcc --version | head -n1)"
         echo "Binary Size: $(du -h build/e2fstool | cut -f1)"
@@ -236,15 +276,45 @@ jobs:
     
     - name: Clone and build libsparse
       run: |
+        # Create missing Android headers
+        sudo mkdir -p /usr/local/include/private
+        cat > /tmp/android_filesystem_capability.h << 'EOF'
+        #ifndef ANDROID_FILESYSTEM_CAPABILITY_H
+        #define ANDROID_FILESYSTEM_CAPABILITY_H
+        #include <stdint.h>
+        #include <sys/types.h>
+        #define VFS_CAP_REVISION_MASK   0xFF000000
+        #define VFS_CAP_REVISION_SHIFT  24
+        #define VFS_CAP_FLAGS_MASK      ~VFS_CAP_REVISION_MASK
+        #define VFS_CAP_FLAGS_EFFECTIVE 0x000001
+        #define VFS_CAP_REVISION_1      0x01000000
+        #define VFS_CAP_REVISION_2      0x02000000
+        #define VFS_CAP_REVISION        VFS_CAP_REVISION_2
+        #define XATTR_CAPS_SZ (sizeof(__le32)*(1 + 2*2))
+        struct vfs_cap_data {
+            uint32_t magic_etc;
+            struct {
+                uint32_t permitted;
+                uint32_t inheritable;
+            } data[2];
+        };
+        #endif
+        EOF
+        sudo cp /tmp/android_filesystem_capability.h /usr/local/include/private/
+        
+        # Clone and build libsparse
         git clone --depth 1 --branch android-10.0.0_r47 \
           https://android.googlesource.com/platform/system/core android-core
         cd android-core/libsparse
+        
+        # Patch output_file.cpp to fix typeof issue
+        sed -i 's/typeof/__typeof__/g' output_file.cpp
         
         cat > Makefile << 'EOF'
         CC = gcc
         CXX = g++
         CFLAGS = -Wall -O2 -fPIC -Iinclude
-        CXXFLAGS = -Wall -O2 -fPIC -Iinclude -std=c++11
+        CXXFLAGS = -Wall -O2 -fPIC -Iinclude -std=gnu++11
         SOURCES = backed_block.cpp output_file.cpp sparse.cpp sparse_crc32.cpp sparse_err.cpp sparse_read.cpp
         OBJECTS = $(SOURCES:.cpp=.o)
         all: libsparse.a libsparse.so
@@ -314,7 +384,6 @@ jobs:
     
     - name: Display artifacts
       run: |
-
         find artifacts -type f -name "e2fstool*" -exec ls -lh {} \;
     
     - name: Create tarball

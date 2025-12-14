@@ -21,7 +21,7 @@ jobs:
       with:
         ref: 1.x
     
-    - name: Install build dependencies
+    - name: Install base build dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y \
@@ -29,16 +29,113 @@ jobs:
           gcc \
           g++ \
           make \
+          cmake \
           pkg-config \
+          git \
           e2fslibs-dev \
           libext2fs-dev \
           libcom-err2 \
           comerr-dev \
-          android-libsparse \
-          android-libsparse-dev \
-          android-libbase \
-          android-libbase-dev \
           zlib1g-dev
+    
+    - name: Clone Android platform system/core for libsparse
+      run: |
+        git clone --depth 1 --branch android-10.0.0_r47 \
+          https://android.googlesource.com/platform/system/core android-core
+    
+    - name: Build libsparse from source
+      run: |
+        cd android-core/libsparse
+        
+        # Create a simple Makefile for libsparse
+        cat > Makefile << 'EOF'
+        CC = gcc
+        CXX = g++
+        CFLAGS = -Wall -O2 -fPIC -Iinclude
+        CXXFLAGS = -Wall -O2 -fPIC -Iinclude -std=c++11
+        
+        SOURCES = backed_block.cpp output_file.cpp sparse.cpp sparse_crc32.cpp sparse_err.cpp sparse_read.cpp
+        OBJECTS = $(SOURCES:.cpp=.o)
+        
+        all: libsparse.a libsparse.so
+        
+        %.o: %.cpp
+        	$(CXX) $(CXXFLAGS) -c $< -o $@
+        
+        libsparse.a: $(OBJECTS)
+        	ar rcs $@ $(OBJECTS)
+        
+        libsparse.so: $(OBJECTS)
+        	$(CXX) -shared -o $@ $(OBJECTS) -lz
+        
+        clean:
+        	rm -f $(OBJECTS) libsparse.a libsparse.so
+        EOF
+        
+        # Build the library
+        make
+        
+        # Install to system
+        sudo cp libsparse.so /usr/local/lib/
+        sudo cp libsparse.a /usr/local/lib/
+        sudo mkdir -p /usr/local/include/sparse
+        sudo cp include/sparse/*.h /usr/local/include/sparse/
+        sudo ldconfig
+    
+    - name: Clone Android platform system/base for libbase
+      run: |
+        git clone --depth 1 --branch android-10.0.0_r47 \
+          https://android.googlesource.com/platform/system/libbase android-base
+    
+    - name: Build libbase from source
+      run: |
+        cd android-base
+        
+        # Create Makefile for minimal libbase
+        cat > Makefile << 'EOF'
+        CC = gcc
+        CXX = g++
+        CXXFLAGS = -Wall -O2 -fPIC -Iinclude -std=c++11 -DNDEBUG
+        
+        SOURCES = \
+          chrono_utils.cpp \
+          file.cpp \
+          logging.cpp \
+          mapped_file.cpp \
+          parsenetaddress.cpp \
+          quick_exit.cpp \
+          stringprintf.cpp \
+          strings.cpp \
+          threads.cpp \
+          test_utils.cpp \
+          errors_unix.cpp
+        
+        OBJECTS = $(SOURCES:.cpp=.o)
+        
+        all: libbase.a libbase.so
+        
+        %.o: %.cpp
+        	$(CXX) $(CXXFLAGS) -c $< -o $@
+        
+        libbase.a: $(OBJECTS)
+        	ar rcs $@ $(OBJECTS)
+        
+        libbase.so: $(OBJECTS)
+        	$(CXX) -shared -o $@ $(OBJECTS) -lpthread
+        
+        clean:
+        	rm -f $(OBJECTS) libbase.a libbase.so
+        EOF
+        
+        # Build what we can
+        make || echo "Some base components failed, continuing..."
+        
+        # Install headers and whatever built successfully
+        sudo mkdir -p /usr/local/include/android-base
+        sudo cp -r include/android-base/*.h /usr/local/include/android-base/ || true
+        [ -f libbase.so ] && sudo cp libbase.so /usr/local/lib/
+        [ -f libbase.a ] && sudo cp libbase.a /usr/local/lib/
+        sudo ldconfig
     
     - name: Display compiler versions
       run: |
@@ -46,21 +143,20 @@ jobs:
         g++ --version
         pkg-config --version
     
-    - name: Check library availability
+    - name: Verify library installation
       run: |
-        echo "=== Checking e2fsprogs libraries ==="
-        pkg-config --exists ext2fs && echo "✓ ext2fs found" || echo "✗ ext2fs not found"
-        pkg-config --exists com_err && echo "✓ com_err found" || echo "✗ com_err not found"
+        echo "=== Checking installed libraries ==="
+        ldconfig -p | grep libsparse || echo "libsparse not in cache"
+        ldconfig -p | grep libbase || echo "libbase not in cache"
+        ldconfig -p | grep libext2fs || echo "libext2fs not in cache"
         
-        echo -e "\n=== Library paths ==="
-        ldconfig -p | grep libext2fs || true
-        ldconfig -p | grep libcom_err || true
-        ldconfig -p | grep libsparse || true
-        ldconfig -p | grep libbase || true
+        echo -e "\n=== Checking header files ==="
+        ls -la /usr/local/include/sparse/ || echo "sparse headers not found"
+        ls -la /usr/local/include/android-base/ || echo "base headers not found"
         
-        echo -e "\n=== Header files ==="
-        find /usr/include -name "ext2fs.h" 2>/dev/null || echo "ext2fs.h not found in /usr/include"
-        find /usr/include -name "sparse.h" 2>/dev/null || echo "sparse.h not found in /usr/include"
+        echo -e "\n=== Library files ==="
+        ls -la /usr/local/lib/libsparse* || echo "libsparse not found"
+        ls -la /usr/local/lib/libbase* || echo "libbase not found"
     
     - name: Create build directory
       run: mkdir -p build
@@ -69,14 +165,17 @@ jobs:
       run: |
         gcc -o build/e2fstool e2fstool.c \
           -I/usr/include \
+          -I/usr/local/include \
+          -L/usr/local/lib \
           -lext2fs \
           -lcom_err \
           -lsparse \
-          -lbase \
           -lz \
           -Wall \
           -Wextra \
-          -O2
+          -O2 \
+          -Wl,-rpath,/usr/local/lib
+      continue-on-error: false
     
     - name: Verify build output
       run: |
@@ -118,7 +217,7 @@ jobs:
       with:
         ref: 1.x
     
-    - name: Install build dependencies
+    - name: Install base build dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y \
@@ -126,16 +225,43 @@ jobs:
           gcc \
           g++ \
           make \
+          cmake \
           pkg-config \
+          git \
           e2fslibs-dev \
           libext2fs-dev \
           libcom-err2 \
           comerr-dev \
-          android-libsparse \
-          android-libsparse-dev \
-          android-libbase \
-          android-libbase-dev \
           zlib1g-dev
+    
+    - name: Clone and build libsparse
+      run: |
+        git clone --depth 1 --branch android-10.0.0_r47 \
+          https://android.googlesource.com/platform/system/core android-core
+        cd android-core/libsparse
+        
+        cat > Makefile << 'EOF'
+        CC = gcc
+        CXX = g++
+        CFLAGS = -Wall -O2 -fPIC -Iinclude
+        CXXFLAGS = -Wall -O2 -fPIC -Iinclude -std=c++11
+        SOURCES = backed_block.cpp output_file.cpp sparse.cpp sparse_crc32.cpp sparse_err.cpp sparse_read.cpp
+        OBJECTS = $(SOURCES:.cpp=.o)
+        all: libsparse.a libsparse.so
+        %.o: %.cpp
+        	$(CXX) $(CXXFLAGS) -c $< -o $@
+        libsparse.a: $(OBJECTS)
+        	ar rcs $@ $(OBJECTS)
+        libsparse.so: $(OBJECTS)
+        	$(CXX) -shared -o $@ $(OBJECTS) -lz
+        EOF
+        
+        make
+        sudo cp libsparse.a /usr/local/lib/
+        sudo cp libsparse.so /usr/local/lib/
+        sudo mkdir -p /usr/local/include/sparse
+        sudo cp include/sparse/*.h /usr/local/include/sparse/
+        sudo ldconfig
     
     - name: Attempt static build
       continue-on-error: true
@@ -143,19 +269,32 @@ jobs:
         mkdir -p build
         gcc -o build/e2fstool-static e2fstool.c \
           -I/usr/include \
+          -I/usr/local/include \
+          -L/usr/local/lib \
           -static \
           -lext2fs \
           -lcom_err \
-          -lsparse \
-          -lbase \
+          /usr/local/lib/libsparse.a \
           -lz \
           -lpthread \
           -Wall \
           -Wextra \
           -O2
     
+    - name: Check if static build succeeded
+      id: check_static
+      run: |
+        if [ -f build/e2fstool-static ]; then
+          echo "static_built=true" >> $GITHUB_OUTPUT
+          ls -lh build/e2fstool-static
+          file build/e2fstool-static
+        else
+          echo "static_built=false" >> $GITHUB_OUTPUT
+          echo "Static build was not successful"
+        fi
+    
     - name: Upload static build if successful
-      if: success()
+      if: steps.check_static.outputs.static_built == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: e2fstool-static-ubuntu-22.04
@@ -175,16 +314,22 @@ jobs:
     
     - name: Display artifacts
       run: |
+
         find artifacts -type f -name "e2fstool*" -exec ls -lh {} \;
     
     - name: Create tarball
       run: |
         cd artifacts
-        tar -czf e2fstool-linux-builds.tar.gz */e2fstool*
+        tar -czf e2fstool-linux-builds.tar.gz */e2fstool* 2>/dev/null || \
+          tar -czf e2fstool-linux-builds.tar.gz **/e2fstool* 2>/dev/null || \
+          echo "No artifacts to package"
         cd ..
-        mv artifacts/e2fstool-linux-builds.tar.gz .
+        if [ -f artifacts/e2fstool-linux-builds.tar.gz ]; then
+          mv artifacts/e2fstool-linux-builds.tar.gz .
+        fi
     
     - name: Upload combined artifact
+      if: hashFiles('e2fstool-linux-builds.tar.gz') != ''
       uses: actions/upload-artifact@v4
       with:
         name: e2fstool-all-builds

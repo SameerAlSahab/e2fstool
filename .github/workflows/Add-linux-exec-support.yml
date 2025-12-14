@@ -45,7 +45,7 @@ jobs:
     
     - name: Create missing Android headers
       run: |
-        # Create the android_filesystem_capability.h header if it doesn't exist
+        # Create the android_filesystem_capability.h header
         sudo mkdir -p /usr/local/include/private
         
         cat > /tmp/android_filesystem_capability.h << 'EOF'
@@ -78,16 +78,79 @@ jobs:
         EOF
         
         sudo cp /tmp/android_filesystem_capability.h /usr/local/include/private/
+        
+        # Create android-base stub headers
+        sudo mkdir -p /usr/local/include/android-base
+        
+        cat > /tmp/stringprintf.h << 'EOF'
+        #ifndef ANDROID_BASE_STRINGPRINTF_H
+        #define ANDROID_BASE_STRINGPRINTF_H
+        
+        #include <string>
+        #include <cstdarg>
+        #include <cstdio>
+        
+        namespace android {
+        namespace base {
+        
+        inline std::string StringPrintf(const char* fmt, ...) {
+            char buf[512];
+            va_list ap;
+            va_start(ap, fmt);
+            vsnprintf(buf, sizeof(buf), fmt, ap);
+            va_end(ap);
+            return std::string(buf);
+        }
+        
+        }  // namespace base
+        }  // namespace android
+        
+        #endif
+        EOF
+        
+        sudo cp /tmp/stringprintf.h /usr/local/include/android-base/
     
     - name: Build libsparse from source
       run: |
         cd android-core/libsparse
         
+        echo "=== Checking StringPrintf usage in sparse_read.cpp ==="
+        grep -n "StringPrintf\|android-base" sparse_read.cpp || echo "No matches found"
+        
         # Patch output_file.cpp to fix typeof issue
         sed -i 's/typeof/__typeof__/g' output_file.cpp
         
+        # Patch sparse_read.cpp - replace StringPrintf usage with simple strings
+        sed -i 's|#include "android-base/stringprintf.h"||g' sparse_read.cpp
+        sed -i 's|android::base::StringPrintf("\([^"]*\)"[^)]*)|"\1"|g' sparse_read.cpp
+        
+        echo "=== After patching ==="
+        grep -n "StringPrintf\|android-base" sparse_read.cpp || echo "Successfully removed android-base dependency"
+        
         # Create a simple Makefile for libsparse
         cat > Makefile << 'EOF'
+        CC = gcc
+        CXX = g++
+        CFLAGS = -Wall -O2 -fPIC -Iinclude
+        CXXFLAGS = -Wall -O2 -fPIC -Iinclude -I/usr/local/include -std=gnu++11
+        
+        SOURCES = backed_block.cpp output_file.cpp sparse.cpp sparse_crc32.cpp sparse_err.cpp sparse_read.cpp
+        OBJECTS = $(SOURCES:.cpp=.o)
+        
+        all: libsparse.a libsparse.so
+        
+        %.o: %.cpp
+        	$(CXX) $(CXXFLAGS) -c $< -o $@
+        
+        libsparse.a: $(OBJECTS)
+        	ar rcs $@ $(OBJECTS)
+        
+        libsparse.so: $(OBJECTS)
+        	$(CXX) -shared -o $@ $(OBJECTS) -lz
+        
+        clean:
+        	rm -f $(OBJECTS) libsparse.a libsparse.so
+        EOF
         CC = gcc
         CXX = g++
         CFLAGS = -Wall -O2 -fPIC -Iinclude

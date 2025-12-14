@@ -1,0 +1,192 @@
+name: Build e2fstool
+
+on:
+  push:
+    branches: [ "1.x", "main" ]
+  pull_request:
+    branches: [ "1.x", "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-ubuntu:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+        
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        ref: 1.x
+    
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          gcc \
+          g++ \
+          make \
+          pkg-config \
+          e2fslibs-dev \
+          libext2fs-dev \
+          libcom-err2 \
+          comerr-dev \
+          android-libsparse \
+          android-libsparse-dev \
+          android-libbase \
+          android-libbase-dev \
+          zlib1g-dev
+    
+    - name: Display compiler versions
+      run: |
+        gcc --version
+        g++ --version
+        pkg-config --version
+    
+    - name: Check library availability
+      run: |
+        echo "=== Checking e2fsprogs libraries ==="
+        pkg-config --exists ext2fs && echo "✓ ext2fs found" || echo "✗ ext2fs not found"
+        pkg-config --exists com_err && echo "✓ com_err found" || echo "✗ com_err not found"
+        
+        echo -e "\n=== Library paths ==="
+        ldconfig -p | grep libext2fs || true
+        ldconfig -p | grep libcom_err || true
+        ldconfig -p | grep libsparse || true
+        ldconfig -p | grep libbase || true
+        
+        echo -e "\n=== Header files ==="
+        find /usr/include -name "ext2fs.h" 2>/dev/null || echo "ext2fs.h not found in /usr/include"
+        find /usr/include -name "sparse.h" 2>/dev/null || echo "sparse.h not found in /usr/include"
+    
+    - name: Create build directory
+      run: mkdir -p build
+    
+    - name: Compile e2fstool
+      run: |
+        gcc -o build/e2fstool e2fstool.c \
+          -I/usr/include \
+          -lext2fs \
+          -lcom_err \
+          -lsparse \
+          -lbase \
+          -lz \
+          -Wall \
+          -Wextra \
+          -O2
+    
+    - name: Verify build output
+      run: |
+        if [ -f build/e2fstool ]; then
+          echo "✓ Build successful!"
+          ls -lh build/e2fstool
+          file build/e2fstool
+          ldd build/e2fstool
+        else
+          echo "✗ Build failed - executable not found"
+          exit 1
+        fi
+    
+    - name: Test executable
+      run: |
+        ./build/e2fstool --help || true
+        ./build/e2fstool || echo "Expected failure - no arguments provided"
+    
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: e2fstool-${{ matrix.os }}
+        path: build/e2fstool
+        retention-days: 30
+    
+    - name: Display build info
+      run: |
+        echo "OS: ${{ matrix.os }}"
+        echo "GCC Version: $(gcc --version | head -n1)"
+        echo "Binary Size: $(du -h build/e2fstool | cut -f1)"
+        echo "Binary Type: $(file build/e2fstool)"
+
+  build-static:
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        ref: 1.x
+    
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          gcc \
+          g++ \
+          make \
+          pkg-config \
+          e2fslibs-dev \
+          libext2fs-dev \
+          libcom-err2 \
+          comerr-dev \
+          android-libsparse \
+          android-libsparse-dev \
+          android-libbase \
+          android-libbase-dev \
+          zlib1g-dev
+    
+    - name: Attempt static build
+      continue-on-error: true
+      run: |
+        mkdir -p build
+        gcc -o build/e2fstool-static e2fstool.c \
+          -I/usr/include \
+          -static \
+          -lext2fs \
+          -lcom_err \
+          -lsparse \
+          -lbase \
+          -lz \
+          -lpthread \
+          -Wall \
+          -Wextra \
+          -O2
+    
+    - name: Upload static build if successful
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: e2fstool-static-ubuntu-22.04
+        path: build/e2fstool-static
+        retention-days: 30
+
+  create-release:
+    needs: [build-ubuntu, build-static]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/1.x'
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+    
+    - name: Display artifacts
+      run: |
+        find artifacts -type f -name "e2fstool*" -exec ls -lh {} \;
+    
+    - name: Create tarball
+      run: |
+        cd artifacts
+        tar -czf e2fstool-linux-builds.tar.gz */e2fstool*
+        cd ..
+        mv artifacts/e2fstool-linux-builds.tar.gz .
+    
+    - name: Upload combined artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: e2fstool-all-builds
+        path: e2fstool-linux-builds.tar.gz
+        retention-days: 90
